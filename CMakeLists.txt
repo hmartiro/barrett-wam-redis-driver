@@ -19,6 +19,13 @@ set(SRC main.cpp wam_redis_driver.cpp)
 
 add_executable(wam_redis_driver ${SRC})
 
+## libbarrett
+find_package(Barrett REQUIRED)
+include_directories(${BARRETT_INCLUDE_DIRS})
+link_directories(${BARRETT_LIBRARY_DIRS})
+add_definitions(${BARRETT_DEFINITIONS})
+target_link_libraries(wam_redis_driver ${BARRETT_LIBRARIES})
+
 # ---------------------------------------------------------
 # Find and link libraries
 # ---------------------------------------------------------
@@ -27,6 +34,9 @@ add_executable(wam_redis_driver ${SRC})
 find_library(REDOX_LIB NAMES redox)
 target_link_libraries(wam_redis_driver ${REDOX_LIB})
 
+find_library(JSONCPP_LIB NAMES jsoncpp)
+target_link_libraries(wam_redis_driver ${JSONCPP_LIB})
+
 # Barrett WAM driver
-find_library(BARRETT_LIB NAMES barrett)
-target_link_libraries(wam_redis_driver ${BARRETT_LIB})
+# find_library(BARRETT_LIB NAMES barrett)
+# target_link_libraries(wam_redis_driver ${BARRETT_LIB})
