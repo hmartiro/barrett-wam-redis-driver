@@ -14,13 +14,11 @@ int main(int argc, char* argv[]) {
   std::string sensors_key = "barrett:wam:sensors";
   std::string actuators_key = "barrett:wam:actuators";
 
-  int frequency = 500;
-
   BarrettWamRedisDriver driver(redis_host, redis_port, sensors_key, actuators_key);
 
   if(!driver.connect()) return 1;
 
-  driver.run(frequency);
+  driver.run();
 
   return 0;
 }

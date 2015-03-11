@@ -5,6 +5,7 @@
 #include <iostream>
 #include <chrono>
 #include <thread>
+#include <string>
 
 #include <barrett/exception.h>
 #include <barrett/units.h>
@@ -27,7 +28,8 @@ BarrettWamRedisDriver::BarrettWamRedisDriver(
     std::string redis_host, int redis_port,
     std::string sensors_key, std::string actuators_key
 ) : redis_host_(redis_host), redis_port_(redis_port),
-    sensors_key_(sensors_key), actuators_key_(actuators_key)
+    sensors_key_(sensors_key), actuators_key_(actuators_key),
+    mode_(Mode::INIT)
 {
   // Give us pretty stack-traces when things die
   barrett::installExceptionHandler();
@@ -39,7 +41,6 @@ BarrettWamRedisDriver::~BarrettWamRedisDriver() {
 
   // Wait for the user to press Shift-idle
   pm_.getSafetyModule()->waitForMode(SafetyModule::IDLE);
-
 }
 
 bool BarrettWamRedisDriver::connect() {
@@ -53,8 +54,6 @@ bool BarrettWamRedisDriver::connect() {
         << redis_host_ << ":" << redis_port_ << "." << std::endl;
     return false;
   }
-
-  // TODO separate into method
 
   pm_.waitForWam(BARRETT_SMF_PROMPT_ON_ZEROING);
   pm_.wakeAllPucks();
@@ -72,69 +71,218 @@ bool BarrettWamRedisDriver::connect() {
     return false;
   }
 
-  // The WAM is now Shift-activated and applying zero torque with a loop-rate
-  // of 500Hz.
-  
+  safety_module_ = pm_.getSafetyModule();
+
+  wam_->gravityCompensate(true);
+
+  running_ = true;
+
   return true;
 }
 
-const std::string& BarrettWamRedisDriver::get_sensor_command() {
+template<int R, int C, typename Units>
+bool jsonToVector(const Json::Value& v, math::Matrix<R,C, Units>& dest) {
 
-  // TODO read from Barrett
-  return sensor_command_;
+  for(int i = 0; i < v.size(); i++) {
+
+    if(!v[i].isConvertibleTo(Json::ValueType::realValue)) {
+      std::cerr << "Cannot parse double from " << v[i] << "!" << std::endl;
+      return false;
+    }
+
+    dest[i] = v[i].asDouble();
+  }
+
+  return true;
 }
 
-void BarrettWamRedisDriver::run(int frequency) {
+//template<int R, int C, typename Units>
+//bool vectorToJson(math::Matrix<R,C, Units>& dest, Json::Value& v) {
+//
+//  v = Json::arrayValue;
+//
+//  for(int i = 0; i < dest.size(); i++) {
+//    // Append as string to get fixed precision (1e-6)
+//    v.append(std::to_string(dest[i]));
+//  }
+//
+//  return true;
+//}
 
-  sensor_command_ = "hello!";
+void BarrettWamRedisDriver::disconnectAllSystems() {
+  wam_->gravityCompensate(false);
+  wam_->supervisoryController.disconnectInput();
+  systems::disconnect(wam_->input);
+}
+
+bool BarrettWamRedisDriver::torqueCommand(const Json::Value& v) {
+
+  if(v.size() != DOF) {
+    std::cerr << "Expecting " << DOF << " torques!" << std::endl;
+    return false;
+  }
+
+  if(!jsonToVector(v, jt_cmd_)) return false;
+
+  std::cout << "Torque command: " << jt_cmd_.transpose() << std::endl;
+
+  jt_cmd_holder_.setValue(jt_cmd_);
+
+  if(mode_ != Mode::TORQUE) {
+    mode_ = Mode::TORQUE;
+    std::cout << "Entering torque control mode." << std::endl;
+    disconnectAllSystems();
+    systems::connect(jt_cmd_holder_.output, wam_->input);
+  }
+
+  return true;
+}
+
+bool BarrettWamRedisDriver::jointCommandRaw(const Json::Value& v) {
+
+  if(v.size() != DOF) {
+    std::cerr << "Expecting " << DOF << " joint positions!" << std::endl;
+    return false;
+  }
+
+  if(!jsonToVector(v, jp_cmd_)) return false;
+
+  std::cout << "Joint command: " << jp_cmd_.transpose() << std::endl;
+
+  jp_cmd_holder_.setValue(jp_cmd_);
+
+  if(mode_ != Mode::JOINT_RAW) {
+    mode_ = Mode::JOINT_RAW;
+    std::cout << "Entering raw joint control mode." << std::endl;
+    disconnectAllSystems();
+    wam_->gravityCompensate(true);
+    wam_->trackReferenceSignal(jp_cmd_holder_.output);
+  }
+
+  return true;
+}
+
+bool BarrettWamRedisDriver::jointCommandEasy(const Json::Value& v) {
+
+  if(v.size() != DOF) {
+    std::cerr << "Expecting " << DOF << " joint positions!" << std::endl;
+    return false;
+  }
+
+  if(!jsonToVector(v, jp_cmd_)) return false;
+
+  std::cout << "Joint command: " << jp_cmd_.transpose() << std::endl;
+
+  if(mode_ != Mode::JOINT_EASY) {
+    mode_ = Mode::JOINT_EASY;
+    std::cout << "Entering easy joint control mode." << std::endl;
+    disconnectAllSystems();
+    wam_->gravityCompensate(true);
+  }
+
+  wam_->moveTo(jp_cmd_);
+
+  return true;
+}
+
+
+bool BarrettWamRedisDriver::cartesianCommandEasy(const Json::Value& v) {
+
+  if(v.size() != 3) {
+    std::cerr << "Expecting " << 3 << " cartesian positions!" << std::endl;
+    return false;
+  }
+
+  if(!jsonToVector(v, cp_cmd_)) return false;
+
+  std::cout << "Cartesian command: " << cp_cmd_.transpose() << std::endl;
+
+  if(mode_ != Mode::CARTESIAN_EASY) {
+    mode_ = Mode::CARTESIAN_EASY;
+    std::cout << "Entering cartesian control mode." << std::endl;
+    disconnectAllSystems();
+    wam_->gravityCompensate(true);
+  }
+
+  wam_->moveTo(cp_cmd_);
+
+  return true;
+}
+
+void BarrettWamRedisDriver::parseActuatorMessage(const std::string& msg) {
+
+  reader_.parse(msg, actuator_msg_);
+
+  std::cout << "[RECV] Actuator msg: " << styled_writer_.write(actuator_msg_) << std::endl;
+
+  if(!actuator_msg_.isObject()) {
+    std::cerr << "Expecting top-level JSON object!" << std::endl;
+    return;
+  }
+
+  if(actuator_msg_.isMember("tau") && actuator_msg_["tau"].isArray()) {
+    torqueCommand(actuator_msg_["tau"]);
+  } else if(actuator_msg_.isMember("q") && actuator_msg_["q"].isArray()) {
+    jointCommandEasy(actuator_msg_["q"]);
+  } else if(actuator_msg_.isMember("q_raw") && actuator_msg_["q_raw"].isArray()) {
+    jointCommandRaw(actuator_msg_["q_raw"]);
+  } else if(actuator_msg_.isMember("p") && actuator_msg_["p"].isArray()) {
+    cartesianCommandEasy(actuator_msg_["p"]);
+  }
+}
+
+void BarrettWamRedisDriver::sendSensorMessage() {
+
+  sensor_msg_ = Json::Value();
+
+  jt_obs_ = wam_->getJointTorques();
+  jp_obs_ = wam_->getJointPositions();
+  jv_obs_ = wam_->getJointVelocities();
+
+  cp_obs_ = wam_->getToolPosition();
+  cv_obs_ = wam_->getToolVelocity();
+
+  std::stringstream ss;
+  ss << "{";
+
+  ss << "\"tau\":[";
+  for(int i = 0; i < jt_obs_.size() - 1; i++)
+    ss << jt_obs_[i] << ",";
+  ss << jt_obs_[jt_obs_.size()-1] << "],";
+
+  ss << "\"q\":[";
+  for(int i = 0; i < jp_obs_.size() - 1; i++)
+    ss << jp_obs_[i] << ",";
+  ss << jp_obs_[jp_obs_.size()-1] << "]";
+
+  // TODO write out jv, cp, cv?
+
+  ss << "}";
+
+//  std::cout << "[SENT] Sensor msg: " << ss.str() << std::endl;
+  pub_.command({"PUBLISH", sensors_key_, ss.str()});
+}
+
+void BarrettWamRedisDriver::run() {
 
   sub_.subscribe(actuators_key_, [&](const std::string& topic, const std::string& msg) {
-
-      // TODO store value as member
-      Json::Value value;
-
-      reader_.parse(msg, value);
-
-      std::cout << "Got message: " << styled_writer_.write(value) << std::endl;
-
-      if(!value.isObject()) {
-        std::cerr << "Expecting top-level JSON object!" << std::endl;
-        return;
-      }
-
-      if(value.isMember("q") && value["q"].isArray()) {
-
-        if(value["q"].size() != DOF) {
-          std::cerr << "Expecting " << DOF << " values!" << std::endl;
-          return;
-        }
-
-        for(int i = 0; i < DOF; i++) {
-
-          if(!value["q"][i].isConvertibleTo(Json::ValueType::realValue)) {
-            std::cerr << "Expecting doubles!" << std::endl;
-            return;
-          }
-
-          jpos_[i] = value["q"][i].asDouble();
-        }
-
-        std::cout << "jpos_ = " << jpos_.transpose() << std::endl;
-
-        wam_->moveTo(jpos_);
-      }
-
-      return;
+      parseActuatorMessage(msg);
   });
 
-  while(true) {
+  auto t0 = std::chrono::system_clock::now();
+  auto dt = std::chrono::milliseconds(1);
+  auto t_goal = t0;
 
-    // TODO write as JSON
+  // TODO why doesn't this work
+//  systems::connect(wam_->jpOutput, pub_sys_.input);
 
-    pub_.command({"PUBLISH", sensors_key_, get_sensor_command()});
+  while(running_) {
 
-    // TODO use frequency for sleep (or better yet, see if we have
-    // event based capability for libbarrett
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000 / frequency));
+    sendSensorMessage();
+
+    // TODO See if we have event based capability for libbarrett
+//    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    t_goal += dt;
+    std::this_thread::sleep_until(t_goal);
   }
 }
