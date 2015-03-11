@@ -5,7 +5,6 @@
 #include <iostream>
 #include <chrono>
 #include <thread>
-#include <string>
 
 #include <barrett/exception.h>
 #include <barrett/units.h>
@@ -124,7 +123,7 @@ bool BarrettWamRedisDriver::torqueCommand(const Json::Value& v) {
 
   if(!jsonToVector(v, jt_cmd_)) return false;
 
-  std::cout << "Torque command: " << jt_cmd_.transpose() << std::endl;
+//  std::cout << "Torque command: " << jt_cmd_.transpose() << std::endl;
 
   jt_cmd_holder_.setValue(jt_cmd_);
 
@@ -147,7 +146,7 @@ bool BarrettWamRedisDriver::jointCommandRaw(const Json::Value& v) {
 
   if(!jsonToVector(v, jp_cmd_)) return false;
 
-  std::cout << "Joint command: " << jp_cmd_.transpose() << std::endl;
+//  std::cout << "Joint command: " << jp_cmd_.transpose() << std::endl;
 
   jp_cmd_holder_.setValue(jp_cmd_);
 
@@ -171,7 +170,7 @@ bool BarrettWamRedisDriver::jointCommandEasy(const Json::Value& v) {
 
   if(!jsonToVector(v, jp_cmd_)) return false;
 
-  std::cout << "Joint command: " << jp_cmd_.transpose() << std::endl;
+//  std::cout << "Joint command: " << jp_cmd_.transpose() << std::endl;
 
   if(mode_ != Mode::JOINT_EASY) {
     mode_ = Mode::JOINT_EASY;
@@ -195,7 +194,7 @@ bool BarrettWamRedisDriver::cartesianCommandEasy(const Json::Value& v) {
 
   if(!jsonToVector(v, cp_cmd_)) return false;
 
-  std::cout << "Cartesian command: " << cp_cmd_.transpose() << std::endl;
+//  std::cout << "Cartesian command: " << cp_cmd_.transpose() << std::endl;
 
   if(mode_ != Mode::CARTESIAN_EASY) {
     mode_ = Mode::CARTESIAN_EASY;
@@ -213,7 +212,7 @@ void BarrettWamRedisDriver::parseActuatorMessage(const std::string& msg) {
 
   reader_.parse(msg, actuator_msg_);
 
-  std::cout << "[RECV] Actuator msg: " << styled_writer_.write(actuator_msg_) << std::endl;
+//  std::cout << "[RECV] Actuator msg: " << styled_writer_.write(actuator_msg_) << std::endl;
 
   if(!actuator_msg_.isObject()) {
     std::cerr << "Expecting top-level JSON object!" << std::endl;
@@ -228,6 +227,21 @@ void BarrettWamRedisDriver::parseActuatorMessage(const std::string& msg) {
     jointCommandRaw(actuator_msg_["q_raw"]);
   } else if(actuator_msg_.isMember("p") && actuator_msg_["p"].isArray()) {
     cartesianCommandEasy(actuator_msg_["p"]);
+  } else if(actuator_msg_.isMember("mode") && actuator_msg_["mode"].isString()) {
+    std::string mode = actuator_msg_["mode"].asString();
+    if(mode == "idle") {
+      disconnectAllSystems();
+      wam_->idle();
+    } else if(mode == "gravity") {
+      disconnectAllSystems();
+      wam_->gravityCompensate(true);
+    } else if(mode == "home") {
+      disconnectAllSystems();
+      wam_->gravityCompensate(true);
+      jp_type home;
+      home << 0.0, -2.0, 0.0, 3.1, 0.0, 0.0, 0.0;
+      wam_->moveTo(home);
+    }
   }
 }
 
