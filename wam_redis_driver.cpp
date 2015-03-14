@@ -44,6 +44,9 @@ BarrettWamRedisDriver::~BarrettWamRedisDriver() {
 
 bool BarrettWamRedisDriver::connect() {
 
+//  pub_.noWait(true);
+//  sub_.noWait(true);
+
   // Connect to Redis
   if(pub_.connect(redis_host_, redis_port_) && (sub_.connect(redis_host_, redis_port_))) {
     std::cout << "Connected to the Redis server at "
@@ -121,6 +124,7 @@ bool BarrettWamRedisDriver::torqueCommand(const Json::Value& v) {
     return false;
   }
 
+  // TODO time this
   if(!jsonToVector(v, jt_cmd_)) return false;
 
 //  std::cout << "Torque command: " << jt_cmd_.transpose() << std::endl;
@@ -230,12 +234,15 @@ void BarrettWamRedisDriver::parseActuatorMessage(const std::string& msg) {
   } else if(actuator_msg_.isMember("mode") && actuator_msg_["mode"].isString()) {
     std::string mode = actuator_msg_["mode"].asString();
     if(mode == "idle") {
+      std::cout << "Idling." << std::endl;
       disconnectAllSystems();
       wam_->idle();
     } else if(mode == "gravity") {
+      std::cout << "Entering gravity comp mode." << std::endl;
       disconnectAllSystems();
       wam_->gravityCompensate(true);
     } else if(mode == "home") {
+      std::cout << "Going to home position." << std::endl;
       disconnectAllSystems();
       wam_->gravityCompensate(true);
       jp_type home;
@@ -246,8 +253,6 @@ void BarrettWamRedisDriver::parseActuatorMessage(const std::string& msg) {
 }
 
 void BarrettWamRedisDriver::sendSensorMessage() {
-
-  sensor_msg_ = Json::Value();
 
   jt_obs_ = wam_->getJointTorques();
   jp_obs_ = wam_->getJointPositions();
@@ -267,9 +272,22 @@ void BarrettWamRedisDriver::sendSensorMessage() {
   ss << "\"q\":[";
   for(int i = 0; i < jp_obs_.size() - 1; i++)
     ss << jp_obs_[i] << ",";
-  ss << jp_obs_[jp_obs_.size()-1] << "]";
+  ss << jp_obs_[jp_obs_.size()-1] << "],";
 
-  // TODO write out jv, cp, cv?
+  ss << "\"dq\":[";
+  for(int i = 0; i < jv_obs_.size() - 1; i++)
+    ss << jv_obs_[i] << ",";
+  ss << jv_obs_[jv_obs_.size()-1] << "],";
+
+//  ss << "\"p\":[";
+//  for(int i = 0; i < cp_obs_.size() - 1; i++)
+//    ss << cp_obs_[i] << ",";
+//  ss << cp_obs_[cp_obs_.size()-1] << "],";
+//
+//  ss << "\"dp\":[";
+//  for(int i = 0; i < cv_obs_.size() - 1; i++)
+//    ss << cv_obs_[i] << ",";
+//  ss << cv_obs_[cv_obs_.size()-1] << "]";
 
   ss << "}";
 
@@ -280,11 +298,12 @@ void BarrettWamRedisDriver::sendSensorMessage() {
 void BarrettWamRedisDriver::run() {
 
   sub_.subscribe(actuators_key_, [&](const std::string& topic, const std::string& msg) {
+//      std::cout << topic << ": " << msg << std::endl;
       parseActuatorMessage(msg);
   });
 
   auto t0 = std::chrono::system_clock::now();
-  auto dt = std::chrono::milliseconds(1);
+  auto dt = std::chrono::microseconds(500);
   auto t_goal = t0;
 
   // TODO why doesn't this work
